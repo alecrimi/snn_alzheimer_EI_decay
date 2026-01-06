@@ -41,8 +41,8 @@ def run_simulation_with_fc(condition_name,
                            band_name,
                            g_ratio,
                            conn_matrix,
-                           N_subnet=200,
-                           N_subnets=15,
+                           N_subnet=21,
+                           N_subnets=19,
                            frac_exc=0.8,
                            p_conn_local=0.15,
                            coupling_strength=2.0,
@@ -276,8 +276,8 @@ BAND_RANGES = {
     'beta': (13, 30),
     'gamma': (30, 45)
 }
-N_SUBNETS = 15
-N_SUBNET = 200
+N_SUBNETS = 19
+N_SUBNET = 21
 
 CONDITIONS = {
     'HC': 6.5,
