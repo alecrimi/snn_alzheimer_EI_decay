@@ -1,9 +1,10 @@
 # Learning Alzheimer's Disease Signatures in EEG  
 ## Spiking Neural Networks and E/I Imbalance Simulations
+![Alt text](graphabs3.png)
 
 This repository accompanies the paper:
 
-**“Learning Alzheimer's Disease Signatures in EEG: Spiking Networks and E/I Imbalance Simulations”**
+**“Learning Alzheimer's Disease Signatures in EEG: Spiking Networks and E/I Imbalance Simulations”** Mamon, Talanov and Crimi
 
 The project presents a unified neuromorphic and mechanistic framework for studying Alzheimer’s disease (AD) from resting-state EEG data by combining:
 
