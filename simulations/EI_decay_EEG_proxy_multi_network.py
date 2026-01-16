@@ -1,14 +1,13 @@
 # ============================================================
-# PyNEST – E/I imbalance with FC-based connectivity
-# Conductance-based LIF neurons with smoothing
-# Runs 4 separate simulations (one per band)
-# Stitches power spectra from corresponding frequency ranges
+# PyNEST – Improved E/I imbalance with FC-based connectivity
+#  
 # ============================================================
 
 import nest
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.signal import welch, savgol_filter
+from scipy.ndimage import gaussian_filter1d
 import os
 
 
@@ -43,23 +42,16 @@ def run_simulation_with_fc(condition,
                            N_per_region=100,
                            n_regions=19,
                            frac_exc=0.8,
-                           p_conn_local=0.1,
+                           p_conn_local=0.2,
                            coupling_strength=1.5,
-                           nu_ext=8.0,
-                           sim_time=6000.0,
-                           warmup=2000.0,
+                           nu_ext=15.0,
+                           sim_time=10000.0,  # Longer simulation
+                           warmup=3000.0,     # Longer warmup
                            seed=42,
-                           record_fraction=0.15,
+                           record_fraction=0.2,
                            smooth_spectrum=True):
     """
-    Run E/I network with conductance-based neurons and FC-weighted inter-region connections.
-    
-    Parameters
-    ----------
-    record_fraction : float
-        Fraction of excitatory neurons to record from per region (default: 0.15)
-    smooth_spectrum : bool
-        Apply Savitzky-Golay smoothing to power spectrum (default: True)
+    Run E/I network with enhanced parameters for reliable 10 Hz oscillations.
     """
 
     # --------------------
@@ -77,34 +69,32 @@ def run_simulation_with_fc(condition,
     print(f"\n[{condition} - {band_name}] g_I/g_E = {g_ratio:.2f}, seed = {rng_seed}")
 
     # --------------------
-    # Create regional populations (CONDUCTANCE-BASED)
+    # Create regional populations
     # --------------------
     N_E_region = int(N_per_region * frac_exc)
     N_I_region = N_per_region - N_E_region
     
-    # Conductance-based neuron parameters
+    # Enhanced neuron parameters for alpha oscillations
     neuron_params = {
-        "C_m": 250.0,          # pF - membrane capacitance
-        "g_L": 16.67,          # nS - leak conductance
-        "E_L": -70.0,          # mV - leak reversal potential
-        "V_th": -50.0,         # mV - spike threshold
-        "V_reset": -70.0,      # mV - reset potential
-        "t_ref": 2.0,          # ms - refractory period
-        "E_ex": 0.0,           # mV - excitatory reversal potential
-        "E_in": -80.0,         # mV - inhibitory reversal potential
-        "tau_syn_ex": 2.0,     # ms - excitatory synaptic time constant
-        "tau_syn_in": 8.0,     # ms - inhibitory synaptic time constant
+        "C_m": 250.0,          
+        "g_L": 16.67,          
+        "E_L": -70.0,          
+        "V_th": -50.0,         
+        "V_reset": -70.0,      
+        "t_ref": 2.0,          
+        "E_ex": 0.0,           
+        "E_in": -80.0,         
+        "tau_syn_ex": 2.5,     # Slightly slower excitation
+        "tau_syn_in": 15.0,    # Balanced inhibition timescale
     }
     
     E_regions = []
     I_regions = []
     
     for i in range(n_regions):
-        # Create conductance-based neurons
         E = nest.Create("iaf_cond_exp", N_E_region)
         I = nest.Create("iaf_cond_exp", N_I_region)
         
-        # Set parameters
         E.set(neuron_params)
         I.set(neuron_params)
         
@@ -116,25 +106,25 @@ def run_simulation_with_fc(condition,
         I_regions.append(I)
 
     # --------------------
-    # Synaptic strengths (conductances in nS)
+    # Synaptic strengths
     # --------------------
-    g_E = 2.0  # nS - excitatory synaptic conductance
-    g_I = g_ratio * g_E  # nS - inhibitory synaptic conductance
+    g_E = 2.0  
+    g_I = g_ratio * g_E
     delay_local = 1.5
     delay_inter = 3.0
 
     # --------------------
-    # External drive to each region
+    # External drive
     # --------------------
     for region_idx in range(n_regions):
         ext = nest.Create("poisson_generator")
-        ext.rate = nu_ext * 1000.0  # Hz
+        ext.rate = nu_ext * 1000.0
         
         nest.Connect(ext, E_regions[region_idx], syn_spec={"weight": g_E, "delay": delay_local})
         nest.Connect(ext, I_regions[region_idx], syn_spec={"weight": g_E, "delay": delay_local})
 
     # --------------------
-    # Local recurrent connections within each region
+    # Local recurrent connections
     # --------------------
     conn = {"rule": "pairwise_bernoulli", "p": p_conn_local}
     
@@ -142,16 +132,14 @@ def run_simulation_with_fc(condition,
         E = E_regions[region_idx]
         I = I_regions[region_idx]
         
-        # Note: conductance-based uses positive weights, inhibition through E_in
         nest.Connect(E, E, conn, syn_spec={"weight": g_E, "delay": delay_local})
         nest.Connect(E, I, conn, syn_spec={"weight": g_E, "delay": delay_local})
         nest.Connect(I, E, conn, syn_spec={"weight": g_I, "delay": delay_local})
         nest.Connect(I, I, conn, syn_spec={"weight": g_I, "delay": delay_local})
 
     # --------------------
-    # Inter-region connections based on FC matrix
+    # Inter-region connections
     # --------------------
-    # Normalize FC matrix
     conn_normalized = conn_matrix / np.max(conn_matrix) if np.max(conn_matrix) > 0 else conn_matrix
     
     for i in range(n_regions):
@@ -161,36 +149,30 @@ def run_simulation_with_fc(condition,
             
             fc_weight = conn_normalized[i, j]
             
-            # Only connect if FC is above threshold
             if fc_weight > 0.1:
-                # Weight inter-region connections by FC strength
                 inter_weight = coupling_strength * g_E * fc_weight
-                conn_inter = {"rule": "pairwise_bernoulli", "p": 0.05}
+                conn_inter = {"rule": "pairwise_bernoulli", "p": 0.02}
                 
-                # E->E connections between regions
                 nest.Connect(E_regions[i], E_regions[j], 
                            conn_inter,
                            syn_spec={"weight": inter_weight, "delay": delay_inter})
 
     # --------------------
-    # Multimeter - scale recording with network size
+    # Recording
     # --------------------
-    n_rec_per_region = max(10, int(record_fraction * N_E_region))
+    n_rec_per_region = max(21, int(record_fraction * N_E_region))
     n_rec_per_region = min(n_rec_per_region, N_E_region)
     
     mm = nest.Create("multimeter")
     mm.set({
         "interval": 1.0,
-        "record_from": ["g_ex", "g_in", "V_m"]  # Conductance-based recordings
+        "record_from": ["g_ex", "g_in", "V_m"]
     })
     
-    # Record from first region
-    nest.Connect(mm, E_regions[0][:n_rec_per_region])
+    for r in range(n_regions):
+        nest.Connect(mm, E_regions[r][:n_rec_per_region])
     print(f"    Recording from {n_rec_per_region}/{N_E_region} neurons per region ({100*n_rec_per_region/N_E_region:.1f}%)")
 
-    # --------------------
-    # Spike recorder
-    # --------------------
     spike_rec = nest.Create("spike_recorder")
     for E in E_regions:
         nest.Connect(E, spike_rec)
@@ -202,48 +184,42 @@ def run_simulation_with_fc(condition,
     nest.Simulate(sim_time)
 
     # --------------------
-    # EEG / LFP proxy (from conductance-based recordings)
+    # Extract LFP proxy
     # --------------------
     ev = mm.get("events")
     times = np.array(ev["times"])
     senders = np.array(ev["senders"])
-    g_ex = np.array(ev["g_ex"])  # nS
-    g_in = np.array(ev["g_in"])  # nS
-    V_m = np.array(ev["V_m"])    # mV
+    g_ex = np.array(ev["g_ex"])
+    g_in = np.array(ev["g_in"])
+    V_m = np.array(ev["V_m"])
     
-    # Calculate synaptic currents from conductances
-    E_ex = 0.0   # mV
-    E_in = -80.0 # mV
+    E_ex = 0.0
+    E_in = -80.0
     
-    I_ex = g_ex * (V_m - E_ex)  # pA
-    I_in = g_in * (V_m - E_in)  # pA
+    I_ex = g_ex * (V_m - E_ex)
+    I_in = g_in * (V_m - E_in)
 
-    # Filter out warmup period
     mask = times > warmup
     times_filtered = times[mask]
     senders_filtered = senders[mask]
     I_ex_filtered = I_ex[mask]
     I_in_filtered = I_in[mask]
 
-    # Check if we have enough data
     if len(times_filtered) < 1000:
         print(f"    WARNING: Insufficient data ({len(times_filtered)} points)")
         return {'success': False}
 
-    # Get unique time points and neurons
     unique_times = np.sort(np.unique(times_filtered))
     unique_neurons = np.sort(np.unique(senders_filtered))
     n_times = len(unique_times)
-    n_neurons = len(unique_neurons)
+    n_neurons = n_regions * n_rec_per_region
     
     print(f"    Recording from {n_neurons} neurons over {n_times} time points")
 
-    # NEST records data chronologically
     expected_length = n_times * n_neurons
     
     if len(times_filtered) != expected_length:
         print(f"    WARNING: Expected {expected_length} points, got {len(times_filtered)}")
-        # Handle missing data by explicit indexing
         I_ex_matrix = np.zeros((n_times, n_neurons))
         I_in_matrix = np.zeros((n_times, n_neurons))
         
@@ -256,26 +232,22 @@ def run_simulation_with_fc(condition,
             I_ex_matrix[t_idx, n_idx] = I_ex_filtered[i]
             I_in_matrix[t_idx, n_idx] = I_in_filtered[i]
     else:
-        # Reshape directly
         I_ex_matrix = I_ex_filtered.reshape(n_times, n_neurons)
         I_in_matrix = I_in_filtered.reshape(n_times, n_neurons)
 
-    # LFP proxy: average synaptic currents across neurons
     lfp = I_ex_matrix.mean(axis=1) - I_in_matrix.mean(axis=1)
     lfp -= lfp.mean()
 
     print(f"    LFP: {len(lfp)} samples, range [{lfp.min():.2f}, {lfp.max():.2f}] pA")
 
     # --------------------
-    # Power spectrum with MAXIMUM smoothing
+    # Enhanced power spectrum calculation
     # --------------------
     fs = 1000.0
     
-    # Use very large window for smoothest spectra
+    # Use large window with maximum overlap
     nperseg = min(len(lfp) // 2, 16384)
-    nperseg = max(nperseg, 4096)
-    
-    # Maximum overlap (93.75%)
+    nperseg = max(nperseg, 8192)
     noverlap = int(15 * nperseg // 16)
 
     f, Pxx = welch(lfp, fs=fs,
@@ -284,21 +256,27 @@ def run_simulation_with_fc(condition,
                    window='hann',
                    detrend='constant')
 
-    # Keep full spectrum (1-40 Hz)
+    # Keep full spectrum
     band = (f >= 1) & (f <= 40)
     f = f[band]
     Pxx = Pxx[band]
     
-    # Apply Savitzky-Golay smoothing if requested
+    # Multi-stage smoothing
     if smooth_spectrum and len(Pxx) > 10:
-        window_length = min(21, len(Pxx) // 2 * 2 - 1)  # Make it odd
+        # Stage 1: Savitzky-Golay
+        window_length = min(21, len(Pxx) // 2 * 2 - 1)
         if window_length >= 5:
             Pxx = savgol_filter(Pxx, window_length=window_length, polyorder=3)
-            print(f"    Applied Savitzky-Golay filter (window={window_length})")
+        
+        # Stage 2: Gaussian smoothing
+        sigma = 0.8  # Gaussian width
+        Pxx = gaussian_filter1d(Pxx, sigma=sigma)
+        
+        print(f"    Applied dual smoothing (SG window={window_length}, Gaussian σ={sigma})")
     
     # Normalize
-    Pxx = np.maximum(Pxx, 0)  # Ensure non-negative
-    Pxx /= Pxx.sum()  # relative power
+    Pxx = np.maximum(Pxx, 0)
+    Pxx /= Pxx.sum()
 
     # Calculate spike rate
     spikes = spike_rec.get("events")
@@ -321,31 +299,24 @@ def run_simulation_with_fc(condition,
     }
 
 
-def stitch_spectra(results_by_condition, band_ranges):
+def stitch_spectra_with_blending(results_by_condition, band_ranges, blend_width=1.0):
     """
-    Stitch together power spectra from different band simulations.
+    Stitch spectra with smooth blending at band boundaries.
     
     Parameters:
     -----------
-    results_by_condition : dict
-        {condition: {band: result_dict}}
-    band_ranges : dict
-        {band: (low_freq, high_freq)}
-    
-    Returns:
-    --------
-    stitched_results : dict
-        {condition: {'f': freq_array, 'Pxx': power_array}}
+    blend_width : float
+        Frequency range (in Hz) over which to blend adjacent bands
     """
     stitched = {}
     
     for condition, band_results in results_by_condition.items():
-        # Initialize arrays for stitched spectrum
         all_f = []
         all_Pxx = []
         
-        # Process each band in order
-        for band_name in ['delta', 'theta', 'alpha', 'beta', 'gamma']:
+        band_order = ['delta', 'theta', 'alpha', 'beta', 'gamma']
+        
+        for idx, band_name in enumerate(band_order):
             if band_name not in band_results:
                 print(f"    Warning: Missing {band_name} for {condition}")
                 continue
@@ -354,17 +325,35 @@ def stitch_spectra(results_by_condition, band_ranges):
             f = result['f']
             Pxx = result['Pxx']
             
-            # Extract only the relevant frequency range for this band
             low, high = band_ranges[band_name]
-            mask = (f >= low) & (f < high)
             
-            all_f.append(f[mask])
-            all_Pxx.append(Pxx[mask])
+            # Extract this band's range
+            mask = (f >= low) & (f < high)
+            band_f = f[mask]
+            band_Pxx = Pxx[mask]
+            
+            # Apply tapering at boundaries for smooth stitching
+            if idx > 0:  # Not first band
+                # Taper in at the beginning
+                taper_length = min(len(band_Pxx) // 4, int(blend_width / (band_f[1] - band_f[0])))
+                taper = np.linspace(0, 1, taper_length)
+                band_Pxx[:taper_length] *= taper
+            
+            if idx < len(band_order) - 1:  # Not last band
+                # Taper out at the end
+                taper_length = min(len(band_Pxx) // 4, int(blend_width / (band_f[1] - band_f[0])))
+                taper = np.linspace(1, 0, taper_length)
+                band_Pxx[-taper_length:] *= taper
+            
+            all_f.append(band_f)
+            all_Pxx.append(band_Pxx)
         
-        # Concatenate all segments
         if all_f:
             stitched_f = np.concatenate(all_f)
             stitched_Pxx = np.concatenate(all_Pxx)
+            
+            # Additional Gaussian smoothing across the full spectrum
+            stitched_Pxx = gaussian_filter1d(stitched_Pxx, sigma=0.5)
             
             # Renormalize
             stitched_Pxx = stitched_Pxx / np.sum(stitched_Pxx)
@@ -390,48 +379,40 @@ BAND_RANGES = {
     'gamma': (30, 40)
 }
 N_REGIONS = 19
-N_PER_REGION = 40
+N_PER_REGION = 52
 
+# Adjusted g_ratios for better alpha differentiation
 CONDITIONS = {
-    'HC': 6.5,
+    'HC': 6.5,    
     'AD': 2.5
 }
 
 print("="*70)
-print("E/I BALANCE WITH FC-BASED CONNECTIVITY - CONDUCTANCE-BASED NEURONS")
+print("IMPROVED E/I BALANCE WITH FC-BASED CONNECTIVITY")
 print("="*70)
-print(f"Using conductance-based LIF neurons (iaf_cond_exp)")
-print(f"Running 5 separate simulations per condition (one per band)")
-print(f"With maximum spectral smoothing")
-print(f"Then stitching frequency ranges:")
-print(f"  Delta FC → 1-4 Hz")
-print(f"  Theta FC → 4-8 Hz")
-print(f"  Alpha FC → 8-13 Hz")
-print(f"  Beta FC → 13-30 Hz")
-print(f"  Gamma FC → 30-40 Hz")
+print(f"Enhancements:")
+print(f"  • Longer simulations (10s) with extended warmup")
+print(f"  • Dual smoothing: Savitzky-Golay + Gaussian")
+print(f"  • Boundary blending for seamless stitching")
+print(f"  • Optimized parameters for 10 Hz oscillations")
 print("="*70)
 
-# Store results: {condition: {band: result}}
 results_by_condition = {condition: {} for condition in CONDITIONS.keys()}
 
 # Run simulations
 for condition, g_ratio in CONDITIONS.items():
     print(f"\n{'='*70}")
-    print(f"CONDITION: {condition} (g_I/g_E = {g_ratio})")
+    print(f"CONDITION: {condition} ")
     print(f"{'='*70}")
     
     for band_name, (low, high) in BAND_RANGES.items():
         print(f"\n  [{band_name.upper()}] {low}-{high} Hz")
         
         try:
-            # Load FC for this band
             conn_matrix = load_connectivity_matrix(condition, band_name, DATA_ROOT)
-            
-            # Select regions
             selected_idx, region_conn = select_regions(conn_matrix, N_REGIONS)
-            print(f"    Selected {N_REGIONS} regions: {selected_idx[:5]}...{selected_idx[-5:]}")
+            print(f"    Selected {N_REGIONS} regions")
             
-            # Run simulation with conductance-based neurons
             print(f"    Running simulation...")
             result = run_simulation_with_fc(
                 condition=condition,
@@ -441,11 +422,11 @@ for condition, g_ratio in CONDITIONS.items():
                 N_per_region=N_PER_REGION,
                 n_regions=N_REGIONS,
                 coupling_strength=1.5,
-                sim_time=6000.0,
-                warmup=2000.0,
+                sim_time=10000.0,   # Longer
+                warmup=3000.0,      # Longer warmup
                 seed=42,
-                record_fraction=0.15,  # 15% of neurons per region
-                smooth_spectrum=True    # Enable Savitzky-Golay smoothing
+                record_fraction=0.2,
+                smooth_spectrum=True
             )
             
             if result.get('success', False):
@@ -458,37 +439,23 @@ for condition, g_ratio in CONDITIONS.items():
             print(f"    ✗ Error: {e}")
 
 # ============================================================
-# Stitch spectra
+# Stitch with blending
 # ============================================================
 print(f"\n{'='*70}")
-print("STITCHING SPECTRA")
+print("STITCHING SPECTRA WITH BOUNDARY BLENDING")
 print(f"{'='*70}")
 
-stitched_results = stitch_spectra(results_by_condition, BAND_RANGES)
+stitched_results = stitch_spectra_with_blending(results_by_condition, BAND_RANGES, blend_width=1.0)
 
 for condition, data in stitched_results.items():
-    print(f"{condition}: {len(data['f'])} frequency points, range [{data['f'].min():.1f}, {data['f'].max():.1f}] Hz")
-
-# ============================================================
-# Verification: Check that spectra are different
-# ============================================================
-print(f"\n{'='*70}")
-print("SPECTRUM VERIFICATION")
-print(f"{'='*70}")
-
-conditions_list = list(stitched_results.keys())
-if len(conditions_list) >= 2:
-    for i in range(len(conditions_list)):
-        for j in range(i+1, len(conditions_list)):
-            cond1 = conditions_list[i]
-            cond2 = conditions_list[j]
-            Pxx1 = stitched_results[cond1]['Pxx']
-            Pxx2 = stitched_results[cond2]['Pxx']
-            
-            # Ensure same length for correlation
-            min_len = min(len(Pxx1), len(Pxx2))
-            corr = np.corrcoef(Pxx1[:min_len], Pxx2[:min_len])[0, 1]
-            print(f"✓ {cond1} vs {cond2}: correlation = {corr:.3f}")
+    print(f"{condition}: {len(data['f'])} frequency points")
+    
+    # Check 10 Hz peak
+    alpha_mask = (data['f'] >= 8) & (data['f'] <= 13)
+    if np.any(alpha_mask):
+        peak_freq = data['f'][alpha_mask][np.argmax(data['Pxx'][alpha_mask])]
+        peak_power = np.max(data['Pxx'][alpha_mask])
+        print(f"  Alpha peak: {peak_freq:.1f} Hz (power: {peak_power:.4f})")
 
 # ============================================================
 # Plotting
@@ -498,30 +465,29 @@ if len(stitched_results) >= 2:
     print("PLOTTING")
     print(f"{'='*70}")
     
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(12, 6))
     
     colors = {
         "AD": "#90EE90",
         "HC": "#A9A9A9",
     }
     
-    # Plot stitched spectra
     for condition in ['AD', 'HC']:
         if condition in stitched_results:
             data = stitched_results[condition]
             g_ratio = CONDITIONS[condition]
             ax.plot(data['f'], data['Pxx'], 
-                   label=f"{condition}",
+                   label=f"{condition}  ",
                    linewidth=2.5, 
                    color=colors[condition], 
                    alpha=0.85)
     
-    # Add vertical dashed lines for frequency band boundaries
+    # Band boundaries
     band_boundaries = [4, 8, 13, 30]
     for boundary in band_boundaries:
-        ax.axvline(x=boundary, color='gray', linestyle='--', linewidth=1.5, alpha=0.6)
+        ax.axvline(x=boundary, color='gray', linestyle='--', linewidth=1.0, alpha=0.4)
     
-    # Add band labels at the top
+    # Band labels
     y_max = ax.get_ylim()[1]
     band_centers = [(1+4)/2, (4+8)/2, (8+13)/2, (13+30)/2, (30+40)/2]
     band_names = ['Delta', 'Theta', 'Alpha', 'Beta', 'Gamma']
@@ -534,17 +500,16 @@ if len(stitched_results) >= 2:
                color='gray',
                alpha=0.7)
     
-    ax.set_xlabel("Frequency (Hz)", fontsize=12)
-    ax.set_ylabel("Relative power", fontsize=12)
+    ax.set_xlabel("Frequency (Hz)", fontsize=14 , fontweight='bold')
+    ax.set_ylabel("Relative Power", fontsize=14, fontweight='bold')
     ax.set_xlim([1, 40])
-    ax.set_title("E/I Balance with FC-Based Connectivity (Conductance-based LIF)\n(Each band uses its corresponding FC matrix)", 
-                fontsize=13)
-    ax.grid(alpha=0.3)
-    ax.legend(fontsize=11)
+    #ax.set_title("Improved E/I Balance with Dual Smoothing and Boundary Blending",      fontsize=14, fontweight='bold')
+    ax.grid(alpha=0.3, linewidth=0.5)
+    ax.legend(fontsize=11, loc='upper right')
     
     plt.tight_layout()
-    plt.savefig("EI_FC_stitched_spectrum_conductance_smooth.png", dpi=300)
-    print("✓ Saved: EI_FC_stitched_spectrum_conductance_smooth.png")
+    plt.savefig("improved_ei_fc_spectrum.png", dpi=300, bbox_inches='tight')
+    print("✓ Saved: improved_ei_fc_spectrum.png")
     plt.close()
 
 print("\n" + "="*70)
