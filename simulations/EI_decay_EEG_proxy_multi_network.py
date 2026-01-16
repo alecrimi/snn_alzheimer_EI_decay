@@ -1,5 +1,6 @@
 # ============================================================
 # PyNEST – E/I imbalance with FC-based connectivity
+# Conductance-based LIF neurons with smoothing
 # Runs 4 separate simulations (one per band)
 # Stitches power spectra from corresponding frequency ranges
 # ============================================================
@@ -7,7 +8,7 @@
 import nest
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.signal import welch
+from scipy.signal import welch, savgol_filter
 import os
 
 
@@ -39,7 +40,7 @@ def run_simulation_with_fc(condition,
                            band_name,
                            g_ratio,
                            conn_matrix,
-                           N_per_region=40,
+                           N_per_region=100,
                            n_regions=19,
                            frac_exc=0.8,
                            p_conn_local=0.1,
@@ -47,9 +48,18 @@ def run_simulation_with_fc(condition,
                            nu_ext=8.0,
                            sim_time=6000.0,
                            warmup=2000.0,
-                           seed=42):
+                           seed=42,
+                           record_fraction=0.15,
+                           smooth_spectrum=True):
     """
-    Run a simple E/I network with FC-weighted inter-region connections.
+    Run E/I network with conductance-based neurons and FC-weighted inter-region connections.
+    
+    Parameters
+    ----------
+    record_fraction : float
+        Fraction of excitatory neurons to record from per region (default: 0.15)
+    smooth_spectrum : bool
+        Apply Savitzky-Golay smoothing to power spectrum (default: True)
     """
 
     # --------------------
@@ -67,38 +77,49 @@ def run_simulation_with_fc(condition,
     print(f"\n[{condition} - {band_name}] g_I/g_E = {g_ratio:.2f}, seed = {rng_seed}")
 
     # --------------------
-    # Create regional populations
+    # Create regional populations (CONDUCTANCE-BASED)
     # --------------------
     N_E_region = int(N_per_region * frac_exc)
     N_I_region = N_per_region - N_E_region
+    
+    # Conductance-based neuron parameters
+    neuron_params = {
+        "C_m": 250.0,          # pF - membrane capacitance
+        "g_L": 16.67,          # nS - leak conductance
+        "E_L": -70.0,          # mV - leak reversal potential
+        "V_th": -50.0,         # mV - spike threshold
+        "V_reset": -70.0,      # mV - reset potential
+        "t_ref": 2.0,          # ms - refractory period
+        "E_ex": 0.0,           # mV - excitatory reversal potential
+        "E_in": -80.0,         # mV - inhibitory reversal potential
+        "tau_syn_ex": 2.0,     # ms - excitatory synaptic time constant
+        "tau_syn_in": 8.0,     # ms - inhibitory synaptic time constant
+    }
     
     E_regions = []
     I_regions = []
     
     for i in range(n_regions):
-        E = nest.Create("iaf_psc_exp", N_E_region)
-        I = nest.Create("iaf_psc_exp", N_I_region)
+        # Create conductance-based neurons
+        E = nest.Create("iaf_cond_exp", N_E_region)
+        I = nest.Create("iaf_cond_exp", N_I_region)
+        
+        # Set parameters
+        E.set(neuron_params)
+        I.set(neuron_params)
         
         # Initialize with variability
-        E.V_m = -70 + 5 * np.random.randn(N_E_region)
-        I.V_m = -70 + 5 * np.random.randn(N_I_region)
-        E.V_th = -50 + 2 * np.random.randn(N_E_region)
-        I.V_th = -50 + 2 * np.random.randn(N_I_region)
-        E.tau_syn_ex = 2.0
-        E.tau_syn_in = 8.0
-        I.tau_syn_ex = 2.0
-        I.tau_syn_in = 8.0
-        E.t_ref = 2.0
-        I.t_ref = 2.0
+        E.V_m = -70.0 + 5.0 * np.random.randn(N_E_region)
+        I.V_m = -70.0 + 5.0 * np.random.randn(N_I_region)
         
         E_regions.append(E)
         I_regions.append(I)
 
     # --------------------
-    # Synaptic strengths
+    # Synaptic strengths (conductances in nS)
     # --------------------
-    g_E = 3.0
-    g_I = g_ratio * g_E
+    g_E = 2.0  # nS - excitatory synaptic conductance
+    g_I = g_ratio * g_E  # nS - inhibitory synaptic conductance
     delay_local = 1.5
     delay_inter = 3.0
 
@@ -121,10 +142,11 @@ def run_simulation_with_fc(condition,
         E = E_regions[region_idx]
         I = I_regions[region_idx]
         
+        # Note: conductance-based uses positive weights, inhibition through E_in
         nest.Connect(E, E, conn, syn_spec={"weight": g_E, "delay": delay_local})
         nest.Connect(E, I, conn, syn_spec={"weight": g_E, "delay": delay_local})
-        nest.Connect(I, E, conn, syn_spec={"weight": -g_I, "delay": delay_local})
-        nest.Connect(I, I, conn, syn_spec={"weight": -g_I, "delay": delay_local})
+        nest.Connect(I, E, conn, syn_spec={"weight": g_I, "delay": delay_local})
+        nest.Connect(I, I, conn, syn_spec={"weight": g_I, "delay": delay_local})
 
     # --------------------
     # Inter-region connections based on FC matrix
@@ -151,19 +173,23 @@ def run_simulation_with_fc(condition,
                            syn_spec={"weight": inter_weight, "delay": delay_inter})
 
     # --------------------
-    # Multimeter for synaptic currents (record from first region)
+    # Multimeter - scale recording with network size
     # --------------------
+    n_rec_per_region = max(10, int(record_fraction * N_E_region))
+    n_rec_per_region = min(n_rec_per_region, N_E_region)
+    
     mm = nest.Create("multimeter")
     mm.set({
         "interval": 1.0,
-        "record_from": ["I_syn_ex", "I_syn_in"]
+        "record_from": ["g_ex", "g_in", "V_m"]  # Conductance-based recordings
     })
     
-    n_rec = min(20, N_E_region)
-    nest.Connect(mm, E_regions[0][:n_rec])
+    # Record from first region
+    nest.Connect(mm, E_regions[0][:n_rec_per_region])
+    print(f"    Recording from {n_rec_per_region}/{N_E_region} neurons per region ({100*n_rec_per_region/N_E_region:.1f}%)")
 
     # --------------------
-    # Spike recorder (optional)
+    # Spike recorder
     # --------------------
     spike_rec = nest.Create("spike_recorder")
     for E in E_regions:
@@ -176,13 +202,21 @@ def run_simulation_with_fc(condition,
     nest.Simulate(sim_time)
 
     # --------------------
-    # EEG / LFP proxy
+    # EEG / LFP proxy (from conductance-based recordings)
     # --------------------
     ev = mm.get("events")
     times = np.array(ev["times"])
     senders = np.array(ev["senders"])
-    I_ex = np.array(ev["I_syn_ex"])
-    I_in = np.array(ev["I_syn_in"])
+    g_ex = np.array(ev["g_ex"])  # nS
+    g_in = np.array(ev["g_in"])  # nS
+    V_m = np.array(ev["V_m"])    # mV
+    
+    # Calculate synaptic currents from conductances
+    E_ex = 0.0   # mV
+    E_in = -80.0 # mV
+    
+    I_ex = g_ex * (V_m - E_ex)  # pA
+    I_in = g_in * (V_m - E_in)  # pA
 
     # Filter out warmup period
     mask = times > warmup
@@ -204,7 +238,7 @@ def run_simulation_with_fc(condition,
     
     print(f"    Recording from {n_neurons} neurons over {n_times} time points")
 
-    # NEST records data chronologically: neuron1@t1, neuron2@t1, ..., neuron1@t2, ...
+    # NEST records data chronologically
     expected_length = n_times * n_neurons
     
     if len(times_filtered) != expected_length:
@@ -222,30 +256,48 @@ def run_simulation_with_fc(condition,
             I_ex_matrix[t_idx, n_idx] = I_ex_filtered[i]
             I_in_matrix[t_idx, n_idx] = I_in_filtered[i]
     else:
-        # Reshape directly - NEST records in blocks per time point
+        # Reshape directly
         I_ex_matrix = I_ex_filtered.reshape(n_times, n_neurons)
         I_in_matrix = I_in_filtered.reshape(n_times, n_neurons)
 
-    # LFP proxy: average across neurons at each time point
+    # LFP proxy: average synaptic currents across neurons
     lfp = I_ex_matrix.mean(axis=1) - I_in_matrix.mean(axis=1)
     lfp -= lfp.mean()
 
     print(f"    LFP: {len(lfp)} samples, range [{lfp.min():.2f}, {lfp.max():.2f}] pA")
 
     # --------------------
-    # Power spectrum
+    # Power spectrum with MAXIMUM smoothing
     # --------------------
     fs = 1000.0
-    nperseg = min(4096, len(lfp) // 4)
+    
+    # Use very large window for smoothest spectra
+    nperseg = min(len(lfp) // 2, 16384)
+    nperseg = max(nperseg, 4096)
+    
+    # Maximum overlap (93.75%)
+    noverlap = int(15 * nperseg // 16)
 
     f, Pxx = welch(lfp, fs=fs,
                    nperseg=nperseg,
-                   noverlap=3 * nperseg // 4)
+                   noverlap=noverlap,
+                   window='hann',
+                   detrend='constant')
 
     # Keep full spectrum (1-40 Hz)
     band = (f >= 1) & (f <= 40)
     f = f[band]
     Pxx = Pxx[band]
+    
+    # Apply Savitzky-Golay smoothing if requested
+    if smooth_spectrum and len(Pxx) > 10:
+        window_length = min(21, len(Pxx) // 2 * 2 - 1)  # Make it odd
+        if window_length >= 5:
+            Pxx = savgol_filter(Pxx, window_length=window_length, polyorder=3)
+            print(f"    Applied Savitzky-Golay filter (window={window_length})")
+    
+    # Normalize
+    Pxx = np.maximum(Pxx, 0)  # Ensure non-negative
     Pxx /= Pxx.sum()  # relative power
 
     # Calculate spike rate
@@ -254,6 +306,8 @@ def run_simulation_with_fc(condition,
     spike_times = spike_times[spike_times > warmup]
     total_neurons = n_regions * N_E_region
     spike_rate = len(spike_times) / (total_neurons * sim_time / 1000.0)
+    
+    print(f"    Spike rate: {spike_rate:.2f} Hz, Welch: nperseg={nperseg}")
 
     return {
         "condition": condition,
@@ -344,9 +398,11 @@ CONDITIONS = {
 }
 
 print("="*70)
-print("E/I BALANCE WITH FC-BASED CONNECTIVITY - STITCHED SPECTRA")
+print("E/I BALANCE WITH FC-BASED CONNECTIVITY - CONDUCTANCE-BASED NEURONS")
 print("="*70)
+print(f"Using conductance-based LIF neurons (iaf_cond_exp)")
 print(f"Running 5 separate simulations per condition (one per band)")
+print(f"With maximum spectral smoothing")
 print(f"Then stitching frequency ranges:")
 print(f"  Delta FC → 1-4 Hz")
 print(f"  Theta FC → 4-8 Hz")
@@ -375,7 +431,7 @@ for condition, g_ratio in CONDITIONS.items():
             selected_idx, region_conn = select_regions(conn_matrix, N_REGIONS)
             print(f"    Selected {N_REGIONS} regions: {selected_idx[:5]}...{selected_idx[-5:]}")
             
-            # Run simulation
+            # Run simulation with conductance-based neurons
             print(f"    Running simulation...")
             result = run_simulation_with_fc(
                 condition=condition,
@@ -387,7 +443,9 @@ for condition, g_ratio in CONDITIONS.items():
                 coupling_strength=1.5,
                 sim_time=6000.0,
                 warmup=2000.0,
-                seed=42
+                seed=42,
+                record_fraction=0.15,  # 15% of neurons per region
+                smooth_spectrum=True    # Enable Savitzky-Golay smoothing
             )
             
             if result.get('success', False):
@@ -444,7 +502,6 @@ if len(stitched_results) >= 2:
     
     colors = {
         "AD": "#90EE90",
-        "MCI": "#FFD700",
         "HC": "#A9A9A9",
     }
     
@@ -480,14 +537,14 @@ if len(stitched_results) >= 2:
     ax.set_xlabel("Frequency (Hz)", fontsize=12)
     ax.set_ylabel("Relative power", fontsize=12)
     ax.set_xlim([1, 40])
-    ax.set_title("E/I Balance with FC-Based Connectivity\n(Each band uses its corresponding FC matrix)", 
+    ax.set_title("E/I Balance with FC-Based Connectivity (Conductance-based LIF)\n(Each band uses its corresponding FC matrix)", 
                 fontsize=13)
     ax.grid(alpha=0.3)
     ax.legend(fontsize=11)
     
     plt.tight_layout()
-    plt.savefig("EI_FC_stitched_spectrum.png", dpi=300)
-    print("✓ Saved: EI_FC_stitched_spectrum.png")
+    plt.savefig("EI_FC_stitched_spectrum_conductance_smooth.png", dpi=300)
+    print("✓ Saved: EI_FC_stitched_spectrum_conductance_smooth.png")
     plt.close()
 
 print("\n" + "="*70)
